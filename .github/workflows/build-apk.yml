@@ -1,0 +1,89 @@
+name: build-apk
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: Arquitetura (arm64-v8a para quase todo celular)
+        type: choice
+        default: arm64-v8a
+        options: [arm64-v8a, armeabi-v7a, x86, x86_64, todas]
+permissions:
+  contents: read
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          ABI: ${{ inputs.abi || 'arm64-v8a' }}
+        run: |
+          all='[{"abi":"arm64-v8a","target":"aarch64-linux-android"},{"abi":"armeabi-v7a","target":"armv7-linux-androideabi"},{"abi":"x86","target":"i686-linux-android"},{"abi":"x86_64","target":"x86_64-linux-android"}]'
+          if [ "$ABI" = "todas" ]; then m="$all"; else m=$(echo "$all" | jq -c --arg a "$ABI" 'map(select(.abi==$a))'); fi
+          echo "matrix={\"include\":$m}" >> "$GITHUB_OUTPUT"
+  apk:
+    needs: pick
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.pick.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verificar e juntar os zips do projeto
+        run: python montar_e_compilar.py --so-juntar --trabalho "$RUNNER_TEMP/trabalho"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Instalar SDK e NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "build-tools;35.0.0" "platforms;android-36" "ndk;28.2.13676358" > /dev/null
+      - name: Instalar Rust e cargo-ndk
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+          cargo install cargo-ndk --version 3.5.4 --locked
+      - name: Compilar o APK
+        working-directory: ${{ env.SRC }}
+        run: |
+          # Tudo vai para um arquivo de log; na tela aparece so o erro.
+          set +e
+          python packaging/android/build_apk.py --abi "${{ matrix.abi }}" --profile quick --preview > "$RUNNER_TEMP/build.log" 2>&1
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then
+            # Blocos "error..." (do primeiro ate a linha em branco), sem warnings.
+            awk '/^error/{p=1} p{print} /^$/{p=0}' "$RUNNER_TEMP/build.log" | head -n 60 > "$RUNNER_TEMP/erros.txt"
+            # Se nao houver bloco "error" (falha do script, Java, SDK...), mostra o fim do log.
+            [ -s "$RUNNER_TEMP/erros.txt" ] || tail -n 25 "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/erros.txt"
+            echo "===== ERRO AO COMPILAR O APK ====="
+            cat "$RUNNER_TEMP/erros.txt"
+            { echo "## Erro ao compilar o APK (${{ matrix.abi }})"; echo '```'; cat "$RUNNER_TEMP/erros.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit "$code"
+          fi
+          echo "APK compilado sem erros."
+      - name: Guardar o log completo (so se falhar)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Log-completo-${{ matrix.abi }}
+          path: ${{ runner.temp }}/build.log
+          retention-days: 7
+      - name: Nomear o APK
+        working-directory: ${{ env.SRC }}/target/android
+        run: |
+          apk=$(ls starling-*.apk | head -1)
+          cp "$apk" "Cat-Launcher-${{ matrix.abi }}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cat-Launcher-apk-${{ matrix.abi }}
+          path: ${{ env.SRC }}/target/android/Cat-Launcher-*.apk
+          if-no-files-found: error
+          retention-days: 30
+          
