@@ -31,11 +31,34 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+      - name: Verificar e juntar os zips do projeto
+        run: |
+          mkdir -p "$RUNNER_TEMP/proj"
+          shopt -s nullglob
+          zips=(*.zip)
+          [ ${#zips[@]} -gt 0 ] || { echo "Nenhum .zip na raiz do repositorio. Envie os zips do projeto."; exit 1; }
+          for z in "${zips[@]}"; do
+            unzip -tq "$z" > /dev/null || { echo "ZIP COM PROBLEMA (corrompido ou incompleto): $z"; exit 1; }
+            echo "OK: $z"
+          done
+          for z in "${zips[@]}"; do echo "Extraindo $z"; unzip -q -o "$z" -d "$RUNNER_TEMP/proj"; done
+          for i in 1 2; do
+            find "$RUNNER_TEMP/proj" -name '*parte*.zip' -print0 | while IFS= read -r -d '' z; do
+              unzip -tq "$z" > /dev/null || { echo "ZIP INTERNO COM PROBLEMA: $z"; exit 1; }
+              unzip -q -o "$z" -d "$(dirname "$z")" && rm "$z"
+            done
+          done
+          script=$(find "$RUNNER_TEMP/proj" -path '*/packaging/android/build_apk.py' | head -1)
+          [ -n "$script" ] || { echo "build_apk.py nao encontrado: faltam partes do projeto?"; exit 1; }
+          src=$(dirname "$(dirname "$(dirname "$script")")")
+          for f in Cargo.toml Cargo.lock packaging/android/AndroidManifest.xml crates/horizon-client/src/game/starling/update_offer.rs; do
+            test -f "$src/$f" || { echo "Arquivo faltando no projeto: $f"; exit 1; }
+          done
+          echo "SRC=$src" >> "$GITHUB_ENV"
+          echo "Projeto completo em $src"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verificar e juntar os zips do projeto
-        run: python montar_e_compilar.py --so-juntar --trabalho "$RUNNER_TEMP/trabalho"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -86,4 +109,3 @@ jobs:
           path: ${{ env.SRC }}/target/android/Cat-Launcher-*.apk
           if-no-files-found: error
           retention-days: 30
-          
